@@ -71,6 +71,14 @@ if df_original.empty:
 # --- Barra Lateral de Filtros (Sidebar) ---
 st.sidebar.header('Panel de Filtros')
 
+# --- REFRESH BUTTON (NUEVO REQUISITO) ---
+# Creamos la lógica para el botón de reinicio
+if st.sidebar.button("🔄 Reiniciar Vista del Mapa"):
+    if 'last_clicked_commune_center' in st.session_state:
+        # Borramos el estado guardado del centro para forzar el centro inicial
+        del st.session_state['last_clicked_commune_center']
+    st.rerun() # Forzamos la recarga de la página
+
 comunas_disponibles = sorted(df_original['Comuna'].unique())
 comunas_seleccionadas = st.sidebar.multiselect(
     'Filtrar por Comuna:',
@@ -126,14 +134,13 @@ else:
     lat_media = df_filtrado['lat'].mean()
     lng_media = df_filtrado['lng'].mean()
     
-    # Intentamos centrar el mapa en la comuna clicada si existe una en la sesión
+    # Lógica para centrar el mapa en la comuna clicada si existe una en la sesión
     initial_center = [lat_media, lng_media]
     initial_zoom = 9
 
-    # Verificamos si hay una comuna previamente seleccionada para ajustar el centro y zoom
     if 'last_clicked_commune_center' in st.session_state:
         initial_center = st.session_state['last_clicked_commune_center']
-        initial_zoom = 10 # Zoom más cercano si ya seleccionaste una comuna
+        initial_zoom = 10 
 
     mapa = folium.Map(location=initial_center, zoom_start=initial_zoom)
 
@@ -205,7 +212,6 @@ else:
     folium.LayerControl().add_to(mapa)
 
     # --- Mostrar el Mapa y CAPTURAR la interacción del usuario ---
-    # Usamos 'key' para forzar la recarga del mapa si cambian los filtros
     map_data = st_folium(
         mapa, 
         width=1000, 
@@ -213,27 +219,24 @@ else:
         key=f"map_{len(df_filtrado)}_{initial_zoom}"
     )
 
-    # --- NUEVA LÓGICA: DIBUJAR GRÁFICO Y LISTAR PUNTOS AL HACER CLIC ---
-    
+    # --- LÓGICA DE CLIC EN COMUNA (GRÁFICO Y TABLA RESUMEN) ---
     try:
-        # Intentamos obtener el nombre de la comuna del evento de click
         clicked_commune = map_data['last_active_object']['properties']['Comuna_Corregida']
         
         if clicked_commune:
-            # 1. Filtramos los datos para la comuna clickeada
             df_comuna = df_filtrado[df_filtrado['Comuna'] == clicked_commune]
             
             if not df_comuna.empty:
-                st.markdown(f"## 📊 Análisis y Puntos en **{clicked_commune}**")
+                st.markdown(f"## 📊 Análisis y Resumen de **{clicked_commune}**")
                 
                 # Opcional: Centrar el mapa en la comuna clicada (guarda el centro para el próximo renderizado)
-                # Esto requiere dos ciclos de Streamlit para funcionar
                 center_lat = df_comuna['lat'].mean()
                 center_lng = df_comuna['lng'].mean()
                 st.session_state['last_clicked_commune_center'] = [center_lat, center_lng]
-                st.rerun() # Forzamos la recarga para que el mapa se centre
+                # Forzamos la recarga para que el mapa se centre
+                st.rerun() 
 
-                # --- Generación del Gráfico de Barras ---
+                # --- 1. Generación del Gráfico de Barras (RE-AGREGADO) ---
                 df_chart = df_comuna.groupby('Ultima registro severidad').size().reset_index(name='Total Casos')
                 
                 fig = px.bar(
@@ -249,13 +252,14 @@ else:
                         'Menor': 'green'
                     }
                 )
+                # Ordenar las barras: Menor, Moderada, Mayor
                 fig.update_layout(xaxis={'categoryorder':'array', 'categoryarray':['Menor', 'Moderada', 'Mayor']})
                 st.plotly_chart(fig, use_container_width=True)
 
-                # --- Nuevo Requisito: Mostrar todos los Puntos/Registros de la Comuna ---
+                # --- 2. Cuadro Resumen (Tabla de PPD) ---
                 st.subheader(f"📌 {len(df_comuna)} PPD Encontrados en {clicked_commune}")
                 
-                # Seleccionamos las columnas más relevantes para la tabla
+                # Definir columnas de interés para el resumen
                 columnas_tabla = [
                     'Codigo', 
                     'Sexo (Desc)', 
@@ -266,7 +270,7 @@ else:
                     'km'
                 ]
                 
-                # Mostramos la tabla solo con las columnas importantes
+                # Mostrar la tabla de resumen
                 st.dataframe(df_comuna[columnas_tabla].rename(columns={
                     'Sexo (Desc)': 'Sexo',
                     'Ultima Edad Registrada': 'Edad',
@@ -277,7 +281,6 @@ else:
                 }), use_container_width=True)
                 
     except (TypeError, KeyError):
-        # Este bloque se ejecuta si no se ha hecho clic o si el clic no fue en una comuna
         st.info("Haz clic en una comuna del mapa para ver el análisis de Severidad y la lista de PPD.")
         
     # Opcional: Mostrar la tabla de datos filtrados
