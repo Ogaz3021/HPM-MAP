@@ -3,6 +3,7 @@ import pandas as pd
 import folium
 from streamlit_folium import st_folium
 import geopandas as gpd
+import plotly.express as px
 
 # --- Configuración de la Página ---
 st.set_page_config(layout="wide", page_title="Dashboard PPD HPM")
@@ -44,13 +45,10 @@ def load_data(csv_file_path):
     return df
 
 # --- Carga de FORMAS (GeoJSON) ---
-# ¡Esta función es ahora MUCHO MÁS SIMPLE!
 @st.cache_data
 def load_shapes(geojson_path):
     try:
-        # 1. Cargar el archivo, que ya está filtrado
         gdf_llanquihue = gpd.read_file(geojson_path)
-        # 2. Asegurarse de que la proyección sea la correcta
         gdf_llanquihue = gdf_llanquihue.to_crs(epsg=4326)
         return gdf_llanquihue
         
@@ -61,7 +59,7 @@ def load_shapes(geojson_path):
 
 # --- Cargar los datos ---
 DATA_FILE = 'BASE TRABAJO FINAL.xlsx - Sheet1.csv'
-SHAPE_FILE = 'llanquihue_comunas.geojson' # <-- CAMBIADO
+SHAPE_FILE = 'llanquihue_comunas.geojson'
 
 df_original = load_data(DATA_FILE)
 gdf_comunas = load_shapes(SHAPE_FILE)
@@ -128,7 +126,16 @@ else:
     lat_media = df_filtrado['lat'].mean()
     lng_media = df_filtrado['lng'].mean()
     
-    mapa = folium.Map(location=[lat_media, lng_media], zoom_start=9)
+    # Intentamos centrar el mapa en la comuna clicada si existe una en la sesión
+    initial_center = [lat_media, lng_media]
+    initial_zoom = 9
+
+    # Verificamos si hay una comuna previamente seleccionada para ajustar el centro y zoom
+    if 'last_clicked_commune_center' in st.session_state:
+        initial_center = st.session_state['last_clicked_commune_center']
+        initial_zoom = 10 # Zoom más cercano si ya seleccionaste una comuna
+
+    mapa = folium.Map(location=initial_center, zoom_start=initial_zoom)
 
     # --- Añadir los Bordes de Comunas (POLÍGONOS) ---
     if gdf_comunas is not None:
@@ -144,13 +151,18 @@ else:
             name='Bordes Comunales',
             style_function=lambda x: style_comunas,
             tooltip=folium.GeoJsonTooltip(
-                # El script de Colab se aseguró de que esta columna exista
                 fields=['Comuna_Corregida'], 
-                aliases=['Comuna:']
+                aliases=['Comuna:'],
+            ),
+            highlight_function=lambda x: {'weight': 3, 'color': 'yellow'},
+            popup=folium.GeoJsonPopup(
+                fields=['Comuna_Corregida'], 
+                aliases=['Comuna:'],
+                localize=True
             )
         ).add_to(mapa)
 
-    # --- Creación de Capas (por Severidad) ---
+    # --- Creación de Capas de Puntos (Markers) ---
     capas_severidad = {
         'Mayor': folium.FeatureGroup(name='Severidad Mayor', show=True).add_to(mapa),
         'Moderada': folium.FeatureGroup(name='Severidad Moderada', show=True).add_to(mapa),
@@ -163,7 +175,6 @@ else:
         'Menor': 'green'
     }
 
-    # Iterar sobre cada fila del dataframe FILTRADO
     for _, row in df_filtrado.iterrows():
         popup_html = f"""
         <b>Código PPD:</b> {row['Codigo']}<br>
@@ -191,11 +202,84 @@ else:
         if severidad in capas_severidad:
             marcador.add_to(capas_severidad[severidad])
 
-    # Añadir el control de capas al mapa
     folium.LayerControl().add_to(mapa)
 
-    # --- Mostrar el Mapa en Streamlit ---
-    st_folium(mapa, width=1000, height=600)
+    # --- Mostrar el Mapa y CAPTURAR la interacción del usuario ---
+    # Usamos 'key' para forzar la recarga del mapa si cambian los filtros
+    map_data = st_folium(
+        mapa, 
+        width=1000, 
+        height=600, 
+        key=f"map_{len(df_filtrado)}_{initial_zoom}"
+    )
 
-    with st.expander("Ver tabla de datos filtrados"):
+    # --- NUEVA LÓGICA: DIBUJAR GRÁFICO Y LISTAR PUNTOS AL HACER CLIC ---
+    
+    try:
+        # Intentamos obtener el nombre de la comuna del evento de click
+        clicked_commune = map_data['last_active_object']['properties']['Comuna_Corregida']
+        
+        if clicked_commune:
+            # 1. Filtramos los datos para la comuna clickeada
+            df_comuna = df_filtrado[df_filtrado['Comuna'] == clicked_commune]
+            
+            if not df_comuna.empty:
+                st.markdown(f"## 📊 Análisis y Puntos en **{clicked_commune}**")
+                
+                # Opcional: Centrar el mapa en la comuna clicada (guarda el centro para el próximo renderizado)
+                # Esto requiere dos ciclos de Streamlit para funcionar
+                center_lat = df_comuna['lat'].mean()
+                center_lng = df_comuna['lng'].mean()
+                st.session_state['last_clicked_commune_center'] = [center_lat, center_lng]
+                st.rerun() # Forzamos la recarga para que el mapa se centre
+
+                # --- Generación del Gráfico de Barras ---
+                df_chart = df_comuna.groupby('Ultima registro severidad').size().reset_index(name='Total Casos')
+                
+                fig = px.bar(
+                    df_chart,
+                    x='Ultima registro severidad',
+                    y='Total Casos',
+                    color='Ultima registro severidad',
+                    title=f'Distribución de Severidad en {clicked_commune}',
+                    labels={'Ultima registro severidad': 'Severidad', 'Total Casos': 'Número de Casos'},
+                    color_discrete_map={
+                        'Mayor': 'red',
+                        'Moderada': 'orange',
+                        'Menor': 'green'
+                    }
+                )
+                fig.update_layout(xaxis={'categoryorder':'array', 'categoryarray':['Menor', 'Moderada', 'Mayor']})
+                st.plotly_chart(fig, use_container_width=True)
+
+                # --- Nuevo Requisito: Mostrar todos los Puntos/Registros de la Comuna ---
+                st.subheader(f"📌 {len(df_comuna)} PPD Encontrados en {clicked_commune}")
+                
+                # Seleccionamos las columnas más relevantes para la tabla
+                columnas_tabla = [
+                    'Codigo', 
+                    'Sexo (Desc)', 
+                    'Ultima Edad Registrada', 
+                    'Ultima registro severidad', 
+                    'Total_Amputaciones',
+                    'tiempo (minutos)', 
+                    'km'
+                ]
+                
+                # Mostramos la tabla solo con las columnas importantes
+                st.dataframe(df_comuna[columnas_tabla].rename(columns={
+                    'Sexo (Desc)': 'Sexo',
+                    'Ultima Edad Registrada': 'Edad',
+                    'Ultima registro severidad': 'Severidad',
+                    'Total_Amputaciones': 'Amputaciones',
+                    'tiempo (minutos)': 'Tiempo HPM (min)',
+                    'km': 'Distancia (km)'
+                }), use_container_width=True)
+                
+    except (TypeError, KeyError):
+        # Este bloque se ejecuta si no se ha hecho clic o si el clic no fue en una comuna
+        st.info("Haz clic en una comuna del mapa para ver el análisis de Severidad y la lista de PPD.")
+        
+    # Opcional: Mostrar la tabla de datos filtrados
+    with st.expander("Ver todos los datos filtrados (sin selección de comuna)"):
         st.dataframe(df_filtrado)
